@@ -1,0 +1,345 @@
+#!/bin/python
+
+import email
+import getopt
+import imaplib
+import os
+import re
+import socket
+import sys
+import tempfile
+
+identifier = 'IMAP File Store'
+
+
+class Error(Exception):
+    def __init__(self, message):
+        self.message = message
+
+class AccessError(Error):
+    pass
+
+class UsageError(Error):
+    pass
+
+
+def command(url, cmd, *args):
+    if cmd in ('delete', 'del', 'rm') and not args:
+        raise UsageError('%s takes at least 1 argument (0 given)' % cmd)
+    elif cmd in ('get', 'cat', 'view', 'put', 'save', 'store',
+                 'edit', 'ed', 'vi') and len(args) != 1:
+        raise UsageError('%s takes exactly 1 argument'
+                         ' (%d given)' % (cmd, len(args)))
+
+    if cmd in ('list', 'ls'):
+        for line in list(url, *args):
+            print line
+    elif cmd in ('delete', 'del', 'rm'):
+        for arg in args:
+            delete(url, arg)
+    elif cmd in ('get', 'cat', 'view'):
+        uid, name, text = get(url, args[0])
+        sys.stdout.write(text)
+    elif cmd in ('put', 'save', 'store'):
+        put(url, args[0], sys.stdin.read())
+    elif cmd in ('edit', 'ed', 'vi'):
+        try:
+            uid, name, oldtext = get(url, args[0])
+        except AccessError:
+            raise
+        except Exception, error:
+            warn(error.message)
+            uid, name, oldtext = None, uidname(args[0])[1], ""
+        if not name:
+            raise Error('No name specified')
+        fn, newtext = edit(oldtext)
+        if not uid or newtext != oldtext:
+            try:
+                if not uid:
+                    warn('Creating new file')
+                put(url, "%s:%s" % (name, uid or ''), newtext)
+                os.unlink(fn)
+            except:
+                warn('Put failed: file left in %s' % fn)
+                raise
+        else:
+            warn('File unchanged: not replacing %s:%s' % (name, uid))
+    else:
+        raise UsageError('command %s not recognised' % cmd)
+
+
+def connect(url):
+    match = re.match(r'(imaps?)://(?:([^@:]+)(?::([^@:]+))?@)?'
+                     r'([^@:/]+)(?::(\d+))?(?:/(.*?)[./]*)?$', url)
+    if not match:
+        raise AccessError("Invalid IMAP URL '%s'" % url)
+    scheme, username, password, host, port, folder = match.groups()
+    host = host or 'localhost'
+    port = port or socket.getservbyname(scheme, 'tcp')
+    username = username or os.environ.get('IFSUSER', None)
+    password = password or os.environ.get('IFSPASS', None)
+    if not username or not password:
+        raise AccessError('IMAP username and password missing')
+    folder = re.sub(r'[/.:]+', '.', folder or '')
+    if folder is '':
+        folder = 'INBOX'
+
+    try:
+        if scheme == 'imaps':
+            connection = imaplib.IMAP4_SSL(host, port)
+        else:
+            connection = imaplib.IMAP4(host, port)
+    except:
+        raise AccessError('Failed to connect to %s:%s' % (host, port))
+
+    try:
+        type, data = connection.login_cram_md5(username, password)
+        if type != 'OK':
+            raise AccessError('Authentication failed')
+        type, data = connection.select(folder)
+        if type != 'OK':
+            raise AccessError('Folder %s not found' % folder)
+    except:
+        connection.logout()
+        raise
+
+    return connection, folder
+
+
+def delete(url, arg):
+    connection, folder = connect(url)
+    try:
+        uid, name = uidname(arg)
+        if uid:
+            if not name:
+                name = getname(connection, uid)
+            if not name or name != getname(connection, uid):
+                raise Error('File %s:%s not found in %s'
+                              % (name or '', uid, folder))
+        else:
+            uids = getuids(connection, name)
+            if not uids:
+                raise Error('File %s not found in %s' % (name, folder))
+            elif len(uids) > 1:
+                copies = ', '.join(['%s:%s' % (name, uid) for uid in uids])
+                raise Error('Multiple copies found: %s' % copies)
+            else:
+                uid = uids[0]
+        type, data = connection.uid('STORE', uid, '+FLAGS', '(\\Deleted)')
+        if type != 'OK':
+            raise Error('Failed to delete %s:%s' % (name, uid))
+        connection.expunge()
+        return uid, name
+    finally:
+        connection.close()
+        connection.logout()
+
+
+def edit(text):
+    editor = os.environ.get('VISUAL', 'vi')
+    editor = os.environ.get('EDITOR', editor)
+    fd, fn = tempfile.mkstemp()
+    f = os.fdopen(fd, "w")
+    f.write(text)
+    f.close()
+    os.spawnlp(os.P_WAIT, editor, editor, fn)
+    f = open(fn)
+    text = f.read()
+    f.close()
+    return fn, text
+
+
+def getname(connection, uid):
+    try:
+        type, data = connection.uid('FETCH', uid,
+                                    '(BODY[HEADER.FIELDS (SUBJECT)])')
+        if type != 'OK':
+            return None
+        name = email.message_from_string(data[0][1]).get('SUBJECT')
+        name = re.sub(r'^ +| +$', '', name or '')
+        if name and re.match(r'[-.\w]+$', name):
+            return name
+        else:
+            return None
+    except:
+        return None
+
+
+def getuids(connection, name):
+    uids = []
+    try:
+        if name:
+            type, data = connection.uid('SEARCH', 'FROM', identifier,
+                                                  'SUBJECT', name)
+            if type == 'OK':
+                uids = [uid for uid in data[0].split()
+                          if name == getname(connection, uid)]
+        else:
+            type, data = connection.uid('SEARCH', 'FROM', identifier)
+            if type == 'OK':
+                uids = [uid for uid in data[0].split()
+                          if getname(connection, uid)]
+    except:
+        pass
+    return uids
+
+
+def get(url, arg):
+    connection, folder = connect(url)
+    try:
+        uid, name = uidname(arg)
+        if uid:
+            if not name:
+                name = getname(connection, uid)
+            if not name or name != getname(connection, uid):
+                raise Error('File %s:%s not found in %s'
+                              % (name or '', uid, folder))
+        else:
+            uids = getuids(connection, name)
+            if not uids:
+                raise Error('File %s not found in %s' % (name, folder))
+            elif len(uids) > 1:
+                copies = ', '.join(['%s:%s' % (name, uid) for uid in uids])
+                raise Error('Multiple copies found: %s' % copies)
+            else:
+                uid = uids[0]
+        type, data = connection.uid('FETCH', uid, '(RFC822)')
+        if type != 'OK':
+            raise Error('File %s:%s not found in %s'
+                          % (name, uid, folder))
+        message = email.message_from_string(data[0][1])
+        text = message.get_payload(None, True) or ''
+        return uid, name, re.sub(r'(?:\r\n|\n|\r(?!\n))', '\n', text)
+    finally:
+        connection.close()
+        connection.logout()
+
+
+def list(url, *names):
+    connection, folder = connect(url)
+    uids = set([])
+    if names:
+        for name in names:
+            uids |= set(getuids(connection, name))
+    else:
+        uids = set(getuids(connection, None))
+    rows = ['%s:%s' % (getname(connection, uid), uid) for uid in uids]
+    rows.sort()
+    return rows
+
+
+def put(url, arg, text, replace=True):
+    connection, folder = connect(url)
+    try:
+        uid, name = uidname(arg)
+        if not replace:
+            uid = None
+        elif uid:
+            if not name:
+                name = getname(connection, uid)
+            if not name or name != getname(connection, uid):
+                raise Error('File %s:%s not found in %s'
+                              % (name or '', uid, folder))
+        else:
+            uids = getuids(connection, name)
+            if len(uids) > 1:
+                copies = ', '.join(['%s:%s' % (name, uid) for uid in uids])
+                warn('Multiple copies found: %s' % copies)
+                warn('Not replacing old version of %s' % name)
+            elif uids:
+                uid = uids[0]
+        message = email.Message.Message()
+        message.set_payload(text)
+        message['Date'] = email.utils.formatdate(None, True)
+        message['From'] = identifier + ': ;'
+        message['Message-ID'] = email.Utils.make_msgid()
+        message['Subject'] = name
+        text = message.as_string()
+        re.sub(r'(?:\r\n|\n|\r(?!\n))', '\r\n', text)
+        type, data = connection.append(folder, None, None, text)
+        if type != 'OK':
+            raise Error('Folder %s not found' % folder)
+        if uid:
+            type, data = connection.uid('STORE', uid, '+FLAGS', '(\\Deleted)')
+            if type != 'OK':
+                raise Error('Failed to delete message %s:%s' % uid)
+            connection.expunge()
+    finally:
+        connection.close()
+        connection.logout()
+
+
+def uidname(arg):
+    match = re.match(r'([-.\w]+)?(?::\*|:(\d+)?)?$', arg)
+    if match:
+        name, uid = match.groups()
+        if uid or name:
+            return uid, name
+    raise Error('Invalid name %s' % arg)
+
+
+def usage(progname):
+    global identifier
+    sys.stderr.write('''\
+Usage: %(progname)s [OPTIONS] COMMAND [ARG]...
+Commands:
+  list [FILE]...
+  get FILE
+  put FILE
+  delete FILE
+  edit FILE
+Aliases:
+  list: dir, ls
+  get: cat, view
+  put: save, store
+  delete: del, rm
+  edit: ed, vi
+Options:
+  -i IDENTIFIER                        set the identifier used in From:
+  -m imap://USER:PASS@HOST/FOLDER      set the IMAP mailbox
+  -n                                   do not replace existing file in put
+Environment:
+  IFSURL       IMAP mailbox URL (no default)
+  IFSNAME      identifier used in From (default '%(identifier)s')
+  IFSUSER      IMAP username if not given in mailbox URL (no default)
+  IFSPASS      IMAP password if not given in mailbox URL (no default)
+''' % {'progname': progname, 'identifier': identifier})
+    return 1
+
+
+def warn(message):
+    print >>sys.stderr, message
+
+
+def main(argv=None):
+    global identifier
+    if argv is None:
+        argv = sys.argv
+    progname = argv[0]
+    identifier = os.environ.get('IFSNAME', identifier)
+    url = os.environ.get('IFSURL', None)
+    try:
+        opts, args = getopt.gnu_getopt(argv[1:], 'i:m:')
+    except:
+        return usage(progname)
+    for opt, arg in opts:
+        if opt == '-i':
+            identifier = arg
+        elif opt == '-m':
+            url = arg
+    try:
+        if not url:
+            raise Error('Mailbox URL not specified: set IFSURL or use -m')
+        if not args:
+            raise UsageError('command not specified')
+        else:
+            command(url, *args)
+    except UsageError, error:
+        return usage(progname)
+    except Error, error:
+        print >>sys.stderr, error.message
+        return 1
+
+
+if __name__ == "__main__":
+    main()
