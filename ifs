@@ -23,7 +23,7 @@ class UsageError(Error):
     pass
 
 
-def command(url, cmd, *args):
+def command(url, cmd, args, replace):
     if cmd in ('delete', 'del', 'rm') and not args:
         raise UsageError('%s takes at least 1 argument (0 given)' % cmd)
     elif cmd in ('get', 'cat', 'view', 'put', 'save', 'store',
@@ -43,7 +43,7 @@ def command(url, cmd, *args):
         uid, name, text = get(url, args[0])
         sys.stdout.write(text)
     elif cmd in ('put', 'save', 'store'):
-        put(url, args[0], sys.stdin.read())
+        put(url, args[0], sys.stdin.read(), replace)
     elif cmd in ('edit', 'ed', 'vi'):
         try:
             uid, name, oldtext = get(url, args[0])
@@ -59,7 +59,9 @@ def command(url, cmd, *args):
             try:
                 if not uid:
                     warn('Creating new file')
-                put(url, "%s:%s" % (name, uid or ''), newtext)
+                    put(url, '%s' % name, newtext, False)
+                else:
+                    put(url, '%s:%s' % (name, uid), newtext, replace)
                 os.unlink(fn)
             except:
                 warn('Put failed: file left in %s' % fn)
@@ -230,7 +232,7 @@ def list(url, *names):
     return rows
 
 
-def put(url, arg, text, replace=True):
+def put(url, arg, text, replace):
     connection, folder = connect(url)
     try:
         uid, name = uidname(arg)
@@ -248,6 +250,7 @@ def put(url, arg, text, replace=True):
                 copies = ', '.join(['%s:%s' % (name, uid) for uid in uids])
                 warn('Multiple copies found: %s' % copies)
                 warn('Not replacing old version of %s' % name)
+                uid = None
             elif uids:
                 uid = uids[0]
         message = email.Message.Message()
@@ -258,11 +261,11 @@ def put(url, arg, text, replace=True):
         message['Subject'] = name
         text = message.as_string()
         re.sub(r'(?:\r\n|\n|\r(?!\n))', '\r\n', text)
-        type, data = connection.append(folder, None, None, text)
+        type, data = connection.append(folder, r'\Seen', None, text)
         if type != 'OK':
             raise Error('Folder %s not found' % folder)
         if uid:
-            type, data = connection.uid('STORE', uid, '+FLAGS', '(\\Deleted)')
+            type, data = connection.uid('STORE', uid, '+FLAGS', r'(\Deleted)')
             if type != 'OK':
                 raise Error('Failed to delete message %s:%s' % uid)
             connection.expunge()
@@ -321,19 +324,22 @@ def main(argv=None):
     identifier = os.environ.get('IFSNAME', identifier)
     url = os.environ.get('IFSURL', None)
     try:
-        opts, args = getopt.gnu_getopt(argv[1:], 'i:m:')
+        opts, args = getopt.gnu_getopt(argv[1:], 'i:m:n')
     except:
         return usage(progname)
+    replace = True
     for opt, arg in opts:
         if opt == '-i':
             identifier = arg
         elif opt == '-m':
             url = arg
+        elif opt == '-n':
+            replace = False
     try:
         if not args:
             raise UsageError('command not specified')
         else:
-            command(url, *args)
+            command(url, args[0], args[1:], replace)
     except UsageError, error:
         return usage(progname)
     except Error, error:
