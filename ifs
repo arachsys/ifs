@@ -156,7 +156,7 @@ def edit(text):
 def getname(connection, uid):
     try:
         type, data = connection.uid('FETCH', uid,
-                                    '(BODY[HEADER.FIELDS (SUBJECT)])')
+                                    '(BODY.PEEK[HEADER.FIELDS (SUBJECT)])')
         if type != 'OK':
             return None
         name = email.message_from_string(data[0][1]).get('SUBJECT')
