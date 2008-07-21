@@ -30,6 +30,8 @@ def command(url, cmd, *args):
                  'edit', 'ed', 'vi') and len(args) != 1:
         raise UsageError('%s takes exactly 1 argument'
                          ' (%d given)' % (cmd, len(args)))
+    elif not url:
+        raise Error('Mailbox URL not specified: set IFSURL or use -m')
 
     if cmd in ('list', 'ls'):
         for line in list(url, *args):
@@ -315,7 +317,7 @@ def main(argv=None):
     global identifier
     if argv is None:
         argv = sys.argv
-    progname = argv[0]
+    progname = os.path.basename(argv[0])
     identifier = os.environ.get('IFSNAME', identifier)
     url = os.environ.get('IFSURL', None)
     try:
@@ -328,8 +330,6 @@ def main(argv=None):
         elif opt == '-m':
             url = arg
     try:
-        if not url:
-            raise Error('Mailbox URL not specified: set IFSURL or use -m')
         if not args:
             raise UsageError('command not specified')
         else:
