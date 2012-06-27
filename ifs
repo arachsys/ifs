@@ -313,7 +313,7 @@ Environment:
 
 
 def warn(message):
-    print >>sys.stderr, message
+    sys.stderr.write('%s\n' % message)
 
 
 def main(argv=None):
@@ -343,7 +343,7 @@ def main(argv=None):
     except UsageError, error:
         return usage(progname)
     except Error, error:
-        print >>sys.stderr, error.message
+        sys.stderr.write('%s' % error.message)
         return 1
 
 
