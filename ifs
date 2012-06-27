@@ -283,8 +283,8 @@ def uidname(arg):
     raise Error('Invalid name %s' % arg)
 
 
-def usage(progname):
-    global identifier
+def usage():
+    global identifier, progname
     sys.stderr.write('''\
 Usage: %(progname)s [OPTIONS] COMMAND [ARG]...
 Commands:
@@ -309,24 +309,22 @@ Environment:
   IFSUSER      IMAP username if not given in mailbox URL (no default)
   IFSPASS      IMAP password if not given in mailbox URL (no default)
 ''' % {'progname': progname, 'identifier': identifier})
-    return 1
+    return 64
 
 
 def warn(message):
     sys.stderr.write('%s\n' % message)
 
 
-def main(argv=None):
-    global identifier
-    if argv is None:
-        argv = sys.argv
+def main(argv):
+    global identifier, progname
     progname = os.path.basename(argv[0])
     identifier = os.environ.get('IFSNAME', identifier)
     url = os.environ.get('IFSURL', None)
     try:
         opts, args = getopt.gnu_getopt(argv[1:], 'i:m:n')
     except:
-        return usage(progname)
+        return usage()
     replace = True
     for opt, arg in opts:
         if opt == '-i':
@@ -341,11 +339,11 @@ def main(argv=None):
         else:
             command(url, args[0], args[1:], replace)
     except UsageError, error:
-        return usage(progname)
+        return usage()
     except Error, error:
         sys.stderr.write('%s' % error.message)
         return 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))
