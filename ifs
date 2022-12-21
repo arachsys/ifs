@@ -1,6 +1,8 @@
 #!/bin/python
 
 import email
+import email.message
+import email.utils
 import getopt
 import imaplib
 import os
@@ -35,36 +37,36 @@ def command(url, cmd, args, replace):
 
     if cmd in ('list', 'ls'):
         for line in list(url, *args):
-            print line
+            print(line)
     elif cmd in ('delete', 'del', 'rm'):
         for arg in args:
             delete(url, arg)
     elif cmd in ('get', 'cat', 'view'):
-        uid, name, text = get(url, args[0])
-        sys.stdout.write(text)
+        uid, name, body = get(url, args[0])
+        sys.stdout.buffer.write(body)
     elif cmd in ('put', 'save', 'store'):
-        put(url, args[0], sys.stdin.read(), replace)
+        put(url, args[0], sys.stdin.buffer.read(), replace)
     elif cmd in ('edit', 'ed', 'vi'):
         try:
-            uid, name, oldtext = get(url, args[0])
+            uid, name, oldbody = get(url, args[0])
         except AccessError:
             raise
-        except Exception, error:
+        except Exception as error:
             warn(error.message)
-            uid, name, oldtext = None, uidname(args[0])[1], ""
+            uid, name, oldbody = None, uidname(args[0])[1], ""
         if not name:
             raise Error('No name specified')
-        fn, newtext = edit(oldtext)
-        if not uid or newtext != oldtext:
+        file, newbody = edit(oldbody)
+        if not uid or newbody != oldbody:
             try:
                 if not uid:
                     warn('Creating new file')
-                    put(url, '%s' % name, newtext, False)
+                    put(url, '%s' % name, newbody, False)
                 else:
-                    put(url, '%s:%s' % (name, uid), newtext, replace)
-                os.unlink(fn)
+                    put(url, '%s:%s' % (name, uid), newbody, replace)
+                os.unlink(file)
             except:
-                warn('Put failed: file left in %s' % fn)
+                warn('Put failed: file left in %s' % file)
                 raise
         else:
             warn('File unchanged: not replacing %s:%s' % (name, uid))
@@ -85,7 +87,7 @@ def connect(url):
     if not username or not password:
         raise AccessError('IMAP username and password missing')
     folder = re.sub(r'[/.:]+', '.', folder or '')
-    if folder is '':
+    if not folder:
         folder = 'INBOX'
 
     try:
@@ -129,7 +131,7 @@ def delete(url, arg):
                 raise Error('Multiple copies found: %s' % copies)
             else:
                 uid = uids[0]
-        type, data = connection.uid('STORE', uid, '+FLAGS', '(\\Deleted)')
+        type, data = connection.uid('STORE', uid, '+FLAGS', r'(\Deleted)')
         if type != 'OK':
             raise Error('Failed to delete %s:%s' % (name, uid))
         connection.expunge()
@@ -139,18 +141,15 @@ def delete(url, arg):
         connection.logout()
 
 
-def edit(text):
+def edit(body):
     editor = os.environ.get('VISUAL', 'vi')
     editor = os.environ.get('EDITOR', editor)
-    fd, fn = tempfile.mkstemp()
-    f = os.fdopen(fd, "w")
-    f.write(text)
-    f.close()
-    os.spawnlp(os.P_WAIT, editor, editor, fn)
-    f = open(fn)
-    text = f.read()
-    f.close()
-    return fn, text
+    fd, name = tempfile.mkstemp()
+    with os.fdopen(fd, "wb") as file:
+        file.write(body)
+    os.spawnlp(os.P_WAIT, editor, editor, name)
+    with open(name, "rb") as file:
+        return name, file.read()
 
 
 def getname(connection, uid):
@@ -159,7 +158,7 @@ def getname(connection, uid):
                                     '(BODY.PEEK[HEADER.FIELDS (SUBJECT)])')
         if type != 'OK':
             return None
-        name = email.message_from_string(data[0][1]).get('SUBJECT')
+        name = email.message_from_bytes(data[0][1]).get('SUBJECT')
         name = re.sub(r'^ +| +$', '', name or '')
         if name and re.match(r'[-.\w]+$', name):
             return name
@@ -173,15 +172,17 @@ def getuids(connection, name):
     uids = []
     try:
         if name:
-            type, data = connection.uid('SEARCH', 'FROM', identifier,
-                                                  'SUBJECT', name)
+            type, data = connection.uid('SEARCH',
+                                        'FROM', connection._quote(identifier),
+                                        'SUBJECT', connection._quote(name))
             if type == 'OK':
-                uids = [uid for uid in data[0].split()
+                uids = [uid.decode() for uid in data[0].split()
                           if name == getname(connection, uid)]
         else:
-            type, data = connection.uid('SEARCH', 'FROM', identifier)
+            type, data = connection.uid('SEARCH',
+                                        'FROM', connection._quote(identifier))
             if type == 'OK':
-                uids = [uid for uid in data[0].split()
+                uids = [uid.decode() for uid in data[0].split()
                           if getname(connection, uid)]
     except:
         pass
@@ -211,9 +212,9 @@ def get(url, arg):
         if type != 'OK':
             raise Error('File %s:%s not found in %s'
                           % (name, uid, folder))
-        message = email.message_from_string(data[0][1])
-        text = message.get_payload(None, True) or ''
-        return uid, name, re.sub(r'(?:\r\n|\n|\r(?!\n))', '\n', text)
+        message = email.message_from_bytes(data[0][1])
+        body = message.get_payload(None, True) or b''
+        return uid, name, re.sub(rb'(?:\r\n|\n|\r(?!\n))', b'\n', body)
     finally:
         connection.close()
         connection.logout()
@@ -232,7 +233,7 @@ def list(url, *names):
     return rows
 
 
-def put(url, arg, text, replace):
+def put(url, arg, body, replace):
     connection, folder = connect(url)
     try:
         uid, name = uidname(arg)
@@ -253,15 +254,15 @@ def put(url, arg, text, replace):
                 uid = None
             elif uids:
                 uid = uids[0]
-        message = email.Message.Message()
-        message.set_payload(text)
+        message = email.message.Message()
+        message.set_payload(body)
         message['Date'] = email.utils.formatdate(None, True)
         message['From'] = identifier + ': ;'
-        message['Message-ID'] = email.Utils.make_msgid()
+        message['Message-ID'] = email.utils.make_msgid()
         message['Subject'] = name
-        text = message.as_string()
-        re.sub(r'(?:\r\n|\n|\r(?!\n))', '\r\n', text)
-        type, data = connection.append(folder, r'\Seen', None, text)
+        body = message.as_bytes()
+        re.sub(rb'(?:\r\n|\n|\r(?!\n))', b'\r\n', body)
+        type, data = connection.append(folder, r'\Seen', None, body)
         if type != 'OK':
             raise Error('Folder %s not found' % folder)
         if uid:
@@ -338,9 +339,9 @@ def main(argv):
             raise UsageError('command not specified')
         else:
             command(url, args[0], args[1:], replace)
-    except UsageError, error:
+    except UsageError as error:
         return usage()
-    except Error, error:
+    except Error as error:
         sys.stderr.write('%s' % error.message)
         return 1
 
